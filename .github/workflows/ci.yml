@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least-privilege GITHUB_TOKEN: this workflow only ever checks out code and
+# runs tests/lint/build - it never pushes, comments, or creates a release -
+# so the default token scope is narrowed to read-only rather than left at
+# whatever a repository's own default permissions happen to be.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: voxmind
+          POSTGRES_PASSWORD: voxmind
+          POSTGRES_DB: voxmind_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U voxmind"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # Phase 9: a real broker so the Celery integration tests exercise a
+      # genuine dispatch -> worker -> Postgres round trip in CI rather than
+      # only the eager-mode unit tests.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
+      JWT_SECRET_KEY: ci-only-secret-not-for-production-use
+      DATABASE_URL: postgresql+asyncpg://voxmind:voxmind@localhost:5432/voxmind_test
+      COOKIE_SECURE: "false"
+      COOKIE_SAMESITE: lax
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_ROOT: ./.data/test-storage
+      LLM_PROVIDER: local_dev
+      REDIS_URL: redis://localhost:6379/0
+      REDIS_RESULT_BACKEND_URL: redis://localhost:6379/1
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Installed the same way docker/api.Dockerfile now does - a plain
+      # `pip install -e ".[dev]"` on Python 3.11 hits a real, genuine
+      # dependency conflict (pyannote-core declares numpy>=2.0, funasr
+      # declares numpy<2) that only a fresh resolve on this Python version
+      # ever surfaces - found during real Docker build verification, not
+      # this CI run itself (this repository has no `gh`/network access to
+      # execute CI for real - see docs/DECISIONS/0016 for the full account
+      # and direct proof the pinned combination below is genuinely correct
+      # at runtime). CI runs on linux/amd64, one architecture this exact
+      # fix was verified on was linux/arm64 (Docker Desktop's VM on this
+      # project's own development machine) - the pins themselves are a pure
+      # metadata resolution, not architecture-specific, but this specific
+      # combination has not been independently confirmed on amd64.
+      - run: pip install --no-cache-dir --no-deps "torch==2.14.0" "torchaudio==2.11.0" --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install --no-cache-dir --no-deps -r docker-constraints.txt
+      - run: pip install --no-cache-dir --no-deps -e ".[dev]"
+      # alembic's initial migration itself runs CREATE EXTENSION IF NOT EXISTS
+      # vector, and the pgvector/pgvector:pg16 image already ships the
+      # extension binary, so no separate setup step is needed here.
+      - run: alembic upgrade head
+      - run: ruff check voxmind tests
+      - run: mypy voxmind --ignore-missing-imports
+      # `real_model` genuinely downloads faster-whisper/Wav2Vec2 (no
+      # credentials needed) and `requires_hf_token` needs a real gated-model
+      # HUGGINGFACE_TOKEN this CI environment doesn't have - both excluded
+      # from the default CI run for speed/determinism. Run the full suite
+      # (including real_model) locally with: pytest -m real_model
+      - run: pytest -m "not real_model and not requires_hf_token"
+      # ml/ dataset & training pipeline logic - pure/fast, no downloads.
+      # NOTE: this must be plain `pytest`, not `apps/api/.venv/bin/pytest` -
+      # this job never creates a `.venv` (actions/setup-python installs
+      # straight into its own managed interpreter via `pip install -e
+      # ".[dev]"` above), so that path never exists in CI. It only worked
+      # when copy-pasted from local dev instructions, where a real `.venv`
+      # exists - found during the Phase 9-readiness audit by inspecting the
+      # job for referenced paths that don't actually exist in this
+      # environment, since this repository doesn't have `gh`/CI execution
+      # access to catch it by actually running the workflow.
+      - run: cd ../.. && pytest tests/ml
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npx oxlint
+      - run: npm run build
+      - run: npx vitest run

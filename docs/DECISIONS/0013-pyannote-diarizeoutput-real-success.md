@@ -1,0 +1,23 @@
+# ADR 0013: real diarization succeeds - the last pyannote.audio 4.x return-shape change
+
+ADR 0012 covered two Hugging Face findings: a `use_auth_token=` → `token=` keyword-argument fix, and a then-still-open gated-repo access gap (`pyannote/speaker-diarization-community-1`). The account has since been granted access to that repo. This ADR covers what happened the first time real diarization inference actually completed a real forward pass end to end - a milestone ADR 0012 could not yet reach.
+
+## A third, final pyannote.audio 4.x compatibility bug
+
+With the gated-repo access resolved, `PyannoteDiarizationProvider._run_pipeline()` genuinely loaded the model and ran real inference (confirmed live: a real ~22-second cold run producing real internal PyTorch pooling-layer warnings, not an instant failure) - and then failed on the very next line: `annotation.itertracks(yield_label=True)` raised `AttributeError: 'DiarizeOutput' object has no attribute 'itertracks'`.
+
+Verified directly against the installed library's source (`pyannote/audio/pipelines/speaker_diarization.py`): this pyannote.audio version wraps its pipeline's return value in a `DiarizeOutput` dataclass (`speaker_diarization: Annotation`, `exclusive_speaker_diarization: Annotation`, `speaker_embeddings: np.ndarray | None`) instead of returning a plain `pyannote.core.Annotation` directly, which is what the code (written against pyannote.audio 3.x's plain-`Annotation` return) expected and what `itertracks()` is a method on. This project's dependency pin (`pyannote.audio>=3.1,<5.0`, unchanged again) genuinely spans both return shapes.
+
+## The fix
+
+One line: `annotation = getattr(result, "exclusive_speaker_diarization", result)` before the existing `itertracks()` loop, which is otherwise completely unchanged. `exclusive_speaker_diarization` was chosen over the plain `speaker_diarization` field because pyannote's own docstring describes it as "adapted to downstream transcription... does not contain overlapping speech turns" - exactly this project's use case (`speech/alignment.py` assigns each Whisper transcript segment to whichever single diarization speaker segment overlaps it longest; a non-overlapping speaker timeline is the more correct input for that algorithm than one containing overlapping turns). The `getattr(..., result)` fallback means a pyannote.audio 3.x pipeline (still permitted by the same version pin, and which returns a plain `Annotation` with no `exclusive_speaker_diarization` attribute) continues to work unchanged - nothing about which pyannote.audio minor version is actually installed had to be detected or special-cased explicitly.
+
+## Verification
+
+Real, live, end to end, twice:
+
+1. `tests/integration/test_diarization_real_model.py::test_real_diarization_runs_against_genuine_audio` (`requires_hf_token`) now genuinely **passes** - real model download/load, real inference, real segments (previously it either raised `TypeError` on the wrong keyword argument, or - after that fix - `AudioProcessingError` wrapping the `DiarizeOutput.itertracks` `AttributeError`, or - before Hugging Face access was granted - a real `GatedRepoError`).
+2. `POST /conversations/{id}/audio/{asset_id}/process`, driven through the real HTTP API against a real Postgres database with the default `InProcessTaskRunner`, now returns `diarization_status="completed"`, `diarization_error=null`, `model_versions.diarization="pyannote/speaker-diarization-3.1"` - and the real result (one `speaker_0` segment, 31ms-2495ms, for this fixture's single-speaker ~2.5s clip) is confirmed persisted in `speaker_segments` by direct query, with the correct `speaker_label` correctly propagated onto the corresponding `aligned_turns` row by the existing, unmodified transcript-alignment algorithm.
+3. A full integrated `POST /conversations/{id}/voice-turns` run reached a genuine `status="completed"` terminal state with real diarization, the unchanged `emotion2vec-tess-emodb-v1` emotion model, and a real Groq-backed LLM answer all present in the same run - the first time this project's full intelligence pipeline has completed with every credential-gated stage genuinely available at once.
+
+Three real, independent pyannote.audio 4.x compatibility issues were found this way (`use_auth_token`→`token` in ADR 0012, the `speaker-diarization-community-1` gated dependency in ADR 0012, and this `DiarizeOutput` return-shape change) - each only discoverable by actually running real inference with a real, valid, sufficiently-scoped token, which is exactly why none of them were caught earlier: every unit test necessarily mocked or skipped the real pyannote call, honestly, for lack of a real credential.

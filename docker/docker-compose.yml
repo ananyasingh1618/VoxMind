@@ -1,0 +1,68 @@
+# Infrastructure-only development mode.
+#
+# This file starts ONLY the stateful services (Postgres with pgvector,
+# Redis, MinIO) - it does NOT start the API or the frontend, and it does NOT
+# run database migrations. Run this when you want to develop the API and/or
+# frontend directly on your machine (uvicorn --reload, npm run dev) with
+# real backing services underneath, which gives the fastest edit/reload
+# loop. See docker-compose.full.yml for the alternative "everything in
+# containers" mode, and docs/development.md for the exact commands for both.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d
+#   (then, once: cd apps/api && alembic upgrade head)
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: voxmind
+      POSTGRES_PASSWORD: voxmind
+      POSTGRES_DB: voxmind
+    ports:
+      # Bound to localhost only - Docker's bare "5432:5432" form binds to
+      # every host interface (0.0.0.0), which would let any other device on
+      # the same network reach this dev-only Postgres directly. Found and
+      # fixed during Docker verification - see docs/DECISIONS/0015.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - voxmind_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voxmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"  # localhost only - see the Postgres port comment above
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: voxmind
+      MINIO_ROOT_PASSWORD: voxmind123
+    ports:
+      - "127.0.0.1:9000:9000" # S3 API - localhost only, see the Postgres port comment above
+      - "127.0.0.1:9001:9001" # Web console - same
+    volumes:
+      - voxmind_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  voxmind_postgres_data:
+  voxmind_minio_data:

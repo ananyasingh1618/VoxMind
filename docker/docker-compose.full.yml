@@ -1,0 +1,134 @@
+# Full Docker stack: adds the API, the Celery worker, and the web container
+# on top of the infrastructure services defined in docker-compose.yml. This
+# file is an OVERLAY, not standalone - run it together with the base file:
+#
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.full.yml up --build
+#
+# Migrations are still NOT run automatically. After the containers are
+# healthy, run once:
+#
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.full.yml \
+#     exec api alembic upgrade head
+#
+# NOTE: these container definitions have STILL not been executed in this
+# repository's development environment - no Docker daemon has been available
+# in any session so far, including the Phase 9 build. The wiring follows
+# standard, reviewable patterns and two real bugs in it were found and fixed
+# by inspection (missing ffmpeg; see DECISIONS/0010), but Docker-based
+# startup remains NOT VERIFIED until someone runs it on a machine with a
+# daemon. Everything Phase 9 added - Celery, Redis broker, worker, queue
+# routing, health/readiness - WAS verified for real outside Docker, against
+# a locally installed Redis and a real `celery worker` process; see
+# docs/celery.md.
+#
+# Secrets: every credential comes from ../apps/api/.env (git-ignored) or the
+# environment - none are hard-coded here. The Postgres/Redis/MinIO
+# development credentials in docker-compose.yml are local-only defaults and
+# must be overridden for any real deployment.
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../apps/api/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voxmind:voxmind@postgres:5432/voxmind
+      REDIS_URL: redis://redis:6379/0
+      REDIS_RESULT_BACKEND_URL: redis://redis:6379/1
+      # A real bug found during Docker verification: this was missing
+      # entirely, so the rate limiter resolved Settings' bare "localhost"
+      # default from inside the container - unreachable there - and, since
+      # RATE_LIMIT_FAIL_OPEN defaults to true, silently ran completely
+      # unprotected (logging rate_limit_backend_unreachable on every
+      # request, honestly, but never actually enforcing a limit). See
+      # docs/DECISIONS/0016.
+      REDIS_RATE_LIMIT_URL: redis://redis:6379/2
+      S3_ENDPOINT_URL: http://minio:9000
+      TASK_RUNNER: celery
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # Uses the real readiness endpoint, which (in celery mode) is only
+      # true when Postgres AND Redis AND a live worker are all reachable.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    # Same image as the API - only the command differs, so the worker can
+    # never drift from the code that enqueues its tasks.
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../apps/api/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voxmind:voxmind@postgres:5432/voxmind
+      REDIS_URL: redis://redis:6379/0
+      REDIS_RESULT_BACKEND_URL: redis://redis:6379/1
+      # A real bug found during Docker verification: this was missing
+      # entirely, so the rate limiter resolved Settings' bare "localhost"
+      # default from inside the container - unreachable there - and, since
+      # RATE_LIMIT_FAIL_OPEN defaults to true, silently ran completely
+      # unprotected (logging rate_limit_backend_unreachable on every
+      # request, honestly, but never actually enforcing a limit). See
+      # docs/DECISIONS/0016.
+      REDIS_RATE_LIMIT_URL: redis://redis:6379/2
+      S3_ENDPOINT_URL: http://minio:9000
+      TASK_RUNNER: celery
+    # prefork is Celery's default pool and the right starting point for this
+    # CPU-heavy (Whisper/Wav2Vec2/embeddings/rerank) workload - see
+    # docs/celery.md before changing it. Concurrency is deliberately small:
+    # each child process can load its own copy of a multi-hundred-MB model.
+    command:
+      [
+        "celery",
+        "-A",
+        "voxmind.workers.celery_app:celery_app",
+        "worker",
+        "--loglevel=info",
+        "--queues=voxmind.ml,voxmind.default",
+        "--concurrency=2",
+        "--max-tasks-per-child=50",
+      ]
+    healthcheck:
+      # `celery inspect ping` asks this worker to actually answer over the
+      # broker's control channel - a process that's alive but wedged/not
+      # consuming fails this, unlike a bare process check.
+      test: ["CMD-SHELL", "celery -A voxmind.workers.celery_app:celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+    restart: unless-stopped
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api

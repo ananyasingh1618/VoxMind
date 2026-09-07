@@ -1,0 +1,37 @@
+{
+  "version": "stt-eval-v1",
+  "description": "STT evaluation samples. Every reference_text below was authored (or, for 'fixture' samples, already documented in apps/api/tests/fixtures/README.md) strictly before and independently of any faster-whisper run - reference transcripts are never generated from the model under test. 'fixture' samples reuse an existing, already-verified test-audio file synthesized via macOS `say` (a completely different, non-neural TTS engine than the app's own TTS provider). 'synthesize_at_eval_time' samples are synthesized fresh at evaluation time using the Phase 5 LocalHfTtsProvider (facebook/mms-tts-eng) from the reference_text, with a fixed torch random seed for reproducibility - this is real synthetic speech audio, not human-recorded speech, and that limitation is deliberate and documented (see docs/evaluation.md): it lets this evaluation run in any environment with no external audio corpus, at the honest cost of not measuring real human-speech accuracy.",
+  "samples": [
+    {
+      "sample_id": "hello_world_fixture",
+      "audio_source": "fixture",
+      "audio_path": "apps/api/tests/fixtures/hello_world.wav",
+      "reference_text": "The quick brown fox jumps over the lazy dog",
+      "notes": "Synthesized via macOS `say`, independent of any Whisper run - see apps/api/tests/fixtures/README.md."
+    },
+    {
+      "sample_id": "synth_01",
+      "audio_source": "synthesize_at_eval_time",
+      "reference_text": "Artificial intelligence systems must be evaluated honestly.",
+      "notes": "Reference sentence authored before synthesis; audio generated fresh from this text at evaluation time."
+    },
+    {
+      "sample_id": "synth_02",
+      "audio_source": "synthesize_at_eval_time",
+      "reference_text": "The weather in San Francisco is mild most of the year.",
+      "notes": "Reference sentence authored before synthesis; audio generated fresh from this text at evaluation time."
+    },
+    {
+      "sample_id": "synth_03",
+      "audio_source": "synthesize_at_eval_time",
+      "reference_text": "Please schedule the meeting for next Tuesday afternoon.",
+      "notes": "Reference sentence authored before synthesis; audio generated fresh from this text at evaluation time."
+    },
+    {
+      "sample_id": "synth_04",
+      "audio_source": "synthesize_at_eval_time",
+      "reference_text": "Machine learning models require careful validation before deployment.",
+      "notes": "Reference sentence authored before synthesis; audio generated fresh from this text at evaluation time."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# ADR 0012: what real credentials revealed - a pyannote keyword-argument bug, a genuinely-gated dependency, an OpenAI-compatible base URL, and a log-safety gap
+
+This project's diarization and LLM providers were built and unit-tested without real Hugging Face or LLM credentials configured in this environment - both degraded honestly ("unavailable"/`None`) exactly as designed. This ADR covers what happened the first time real credentials for both were actually configured and exercised.
+
+## Part A: Hugging Face / pyannote diarization
+
+### A real code bug, found only once a real token existed to expose it
+
+`PyannoteDiarizationProvider._get_pipeline()` called `Pipeline.from_pretrained(model, use_auth_token=token)`. With a real `HUGGINGFACE_TOKEN` configured for the first time, this raised `TypeError: Pipeline.from_pretrained() got an unexpected keyword argument 'use_auth_token'` on every call - instantly, before any network request. The installed `pyannote.audio` version (4.0.7, inside this project's existing `>=3.1,<5.0` pin - never changed) renamed this parameter to `token` at some point in its 3.x-to-4.x evolution; verified directly via `inspect.signature(Pipeline.from_pretrained)`, which shows `(checkpoint, revision, hparams_file, subfolder, token, cache_dir)` - no `use_auth_token` at all.
+
+The broad `except Exception` around this call (deliberately present so a raw exception, which can include the token in a request repr, is never allowed to propagate) reclassified this `TypeError` as "the Hugging Face token is invalid, or the gated model terms haven't been accepted" - a real, misleading diagnosis, since the request never even reached the network. The line's own `# type: ignore[call-arg]` comment had asserted the bundled type stubs were the ones that were wrong; they weren't - they correctly described this version's real signature, and were being silenced instead of read.
+
+**Fix**: changed `use_auth_token=` to `token=`. No dependency version was touched.
+
+### A separate, genuine, still-open access requirement
+
+With that fixed, the same call reached the network for real and failed differently - this time after a real ~11 second round trip, with a real, specific `huggingface_hub.errors.GatedRepoError` (403, not 401): loading `pyannote/speaker-diarization-3.1`'s embedding step (`pyannote/wespeaker-voxceleb-resnet34-LM`) now also requires access to `pyannote/speaker-diarization-community-1`, a *third* gated repository this project's documentation and the account's already-accepted terms (`pyannote/segmentation-3.0`, `pyannote/speaker-diarization-3.1`) never covered. `speaker-diarization-3.1`'s own downloaded `config.yaml` confirms it does not declare this repo as a direct pipeline dependency - it is pulled in transitively by the embedding step's own loading code in this pyannote.audio version, a real behavior change of the installed library version, not anything this project's code or configuration controls.
+
+This is a genuine, external, unresolved access gap - not a bug, not fabricatable, and not something visiting a webpage on this machine can resolve on the account owner's behalf. **Status: BLOCKED**, honestly, pending the account owner accepting terms at `https://huggingface.co/pyannote/speaker-diarization-community-1`, exactly the same manual step already taken for the other two repos.
+
+## Part B: Groq via `OpenAiLlmProvider`
+
+### The reuse itself worked exactly as expected
+
+Groq documents its Chat Completions API, including `tools`/`tool_choice` (explicitly including `{"type": "function", "function": {"name": "..."}}` to force one specific tool by name), as matching OpenAI's schema. `OpenAiLlmProvider` already builds exactly that request shape to force `STRUCTURED_RESPONSE_TOOL_NAME`. The only real gap was that its `OpenAI(...)` client construction never accepted a `base_url`, so it was hardcoded to OpenAI's own endpoint. Fixed with one new optional setting, `OPENAI_BASE_URL: str | None = None` (defaults to `None`, which is `openai-python`'s own existing default - a real OpenAI deployment's behavior is provably unchanged), and one line in the client constructor: `OpenAI(api_key=..., base_url=settings.OPENAI_BASE_URL)`. No new provider class, no change to the request-building code, the schema, parsing, or error handling.
+
+### A model name had to be verified against the real API, not assumed
+
+`llama-3.3-70b-versatile`, a plausible and previously-common Groq model name, returned a real `404 model_not_found` - it is not present in `GET /v1/models` for this account today. The real, current list was fetched with the real configured client (`client.models.list()`) rather than assumed from any external documentation, since a Groq account's actual available lineup is authoritative and can move. `openai/gpt-oss-120b` was selected from that real list: OpenAI's own open-weight flagship, documented as supporting tool use, JSON mode, and structured outputs, and it worked correctly on the first real request that used it - forced tool-call, valid JSON, parsed into a real `LlmResponse` with no schema errors.
+
+### A real, narrowly-scoped secret-logging gap, found and fixed
+
+`GuardrailService`'s `OpenAiModerationProvider` builds its own, separate `OpenAI(api_key=settings.OPENAI_API_KEY)` client - it was never touched by the `OPENAI_BASE_URL` change above, and Groq has no moderation endpoint, so with a Groq key configured this call now fails every time (a real, expected, honest degradation - it already had a real, working, keyword-based fallback for exactly this "moderation unavailable" case, and guardrail decisions were reached correctly during verification). The problem found was in how that failure was logged: `logger.warning("openai_moderation_failed_falling_back", error=str(exc))` logged the raw exception, and the `openai` SDK's own `AuthenticationError` message includes a masked-but-partial echo of the real API key (its own first-and-last-few-characters-visible convention, the same one shown on `platform.openai.com`'s own key management page) - proven live during this verification, not theoretical. `OpenAiLlmProvider`'s equivalent `generate()` failure handler had the identical pattern (`error=str(exc)`), against the same SDK and the same exception class, so the same live-proven mechanism applies there too, even though this specific pass's OpenAI-path failures happened to be 404s that didn't happen to include a key fragment. Both were changed to log `error_type=type(exc).__name__` only - no exception content at all, matching the safe pattern `diarization_provider.py` already used for the equivalent pyannote/huggingface_hub case. `anthropic_provider.py`'s analogous line was deliberately left untouched: a different SDK and vendor, not exercised by this task, with no evidence of the same behavior.
+
+One masked key fragment (roughly a dozen characters of a 56-character key, with the middle majority already asterisked out by OpenAI's own formatting) did appear in this session's own diagnostic tool output before the fix landed - disclosed in full in the final report's Security section rather than omitted, along with a rotation recommendation out of caution.
+
+## Verification
+
+Both parts were verified against the real external services, through VoxMind's actual provider/service architecture (not curl, not a standalone script, not a mock), including one full integrated pipeline run (`POST /conversations/{id}/voice-turns`) that genuinely reached `status="completed"` end to end for the first time in this project's history - real STT, a real (blocked, honestly so) diarization attempt, the unchanged `emotion2vec-tess-emodb-v1` model, real NLP/incongruence, real retrieval, a real Groq-generated answer, real guardrail approval, and real TTS synthesis, with every stage's real output persisted to Postgres and confirmed by direct query. See the session's final report for the complete stage-by-stage breakdown.

@@ -1,0 +1,25 @@
+# ADR 0009: Real interruption is a cancellation handler, not disconnect polling
+
+## What was tried first, and why it was wrong
+
+The first implementation of the Phase 5 voice loop (`VoiceTurnService.run()`) called `await request.is_disconnected()` between every stage (after STT, after analysis, after generation), on the assumption that this was how a client hitting "stop" mid-pipeline would be detected server-side, and that without it, the server would keep doing real work after the client had already gone away.
+
+Live testing (not assumption) disproved this design in an instructive way. Killing a real client connection mid-request (via `curl --max-time`, and separately via cancelling an `asyncio.Task` running the request) showed that Starlette's `StreamingResponse` already detects the disconnect on its own and cancels the request's task directly - a genuine `asyncio.CancelledError` gets delivered straight into whatever `await` the handler happens to be suspended at, the moment the ASGI server notices the connection is gone. The manual `is_disconnected()` checks between stages never got a chance to run in the failure case that mattered: by the time execution would have reached one, the task had already been cancelled mid-stage.
+
+The investigation to find this took several live iterations because the initial symptom looked like a hang, not a cancellation: the process appeared to sit motionless with the `voice_turns` row stuck at `status="pending"`. Root-causing it required injecting temporary diagnostic logging around every `await` point and a deliberate `asyncio.sleep(5)` to get a wide, reproducible window - which showed the sleep itself raising `CancelledError` almost immediately after the client disconnected, not "never resolving." A stuck `status="pending"` row is the *expected* appearance of a task that was correctly cancelled but never got a chance to update its own status - not evidence of a hang.
+
+## The fix
+
+`run()` now wraps its entire pipeline in one `try`/`except asyncio.CancelledError`. On cancellation, it does not try to detect anything - the runtime already did that - it does cleanup: mark the `VoiceTurn` row `status="interrupted"` and commit, then re-raise (cancellation must never be swallowed; the caller needs to see it complete).
+
+That cleanup write itself has to be shielded: by the time `except asyncio.CancelledError` runs, the enclosing scope is already in a cancelled state, and an unshielded `await` inside the handler would immediately raise the same `CancelledError` again before reaching the database. `anyio.CancelScope(shield=True)` around the `mark_interrupted()` + `commit()` calls protects exactly that cleanup from the outer cancellation, which is the standard structured-concurrency pattern for "run this even though we're being torn down."
+
+The scattered `is_disconnected()` polling calls were removed entirely rather than kept as redundant defense-in-depth: they added complexity that live testing showed does nothing in the case they exist for, and having them still enabled next to the real fix would misrepresent which mechanism actually provides interruption.
+
+## Why this is the right level of fix
+
+This is a Phase 5 component being built in this same pass, not a change to frozen Phase 1-3 architecture. The one change that did touch earlier code - converting `RequestContextMiddleware` (Phase 1) from a `starlette.middleware.base.BaseHTTPMiddleware` subclass to plain ASGI middleware (`core/middleware.py`) - was made because `BaseHTTPMiddleware` has a separately-documented Starlette issue where it can interfere with a request's disconnect/cancellation handling. It was evaluated live (X-Request-ID echoing was re-verified working identically afterward, and the full backend test suite re-run clean) and kept because it's a strict improvement with no observed downside, even though the final fix turned out not to depend on it - the cancellation behavior verified here works the same with either middleware style, since it comes from Starlette's `StreamingResponse` itself, not from `RequestContextMiddleware`.
+
+## Verification
+
+Live, repeated, against a real running server: a client connection killed during the `processing` (STT) stage produces a clean `status="interrupted"` row and a log line with no unhandled traceback; the same during the `thinking` (analysis) stage using a temporary deterministic delay to widen the timing window. An automated test (`tests/integration/test_voice_turn_pipeline_real.py::test_voice_turn_marks_interrupted_when_cancelled_mid_pipeline`) exercises the exact mechanism by driving `run()`'s async generator directly and delivering `asyncio.CancelledError` via `athrow()` - this isolates the cancellation-handling logic from an unrelated, pre-existing pytest-asyncio/asyncpg event-loop-teardown interaction that made a full HTTP-level cancellation test flaky in this specific test harness (not a product bug; the same class of issue `conftest.py`'s own docstring already documents for other tests).

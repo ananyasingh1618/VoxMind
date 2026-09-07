@@ -1,0 +1,44 @@
+# Real gap found and fixed during Docker verification (Part D, production
+# engineering completion pass): this file did not exist at all before now.
+# Every docker-compose service (api/worker/web) uses `context: ..` (the
+# repo root), so without this, `COPY apps/api/ ./` / `COPY apps/web/ ./`
+# would copy apps/api/.env - a real file containing real secrets (a
+# Hugging Face token, a Groq API key) - directly into image layers, which
+# can persist even if a later layer "deletes" it. See
+# docs/DECISIONS/0015-docker-verification.md.
+
+# Secrets - never baked into an image. Real config comes from env_file/
+# environment at container *run* time (docker-compose.full.yml), never
+# copied in at *build* time.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python virtual environments and caches - large, host-specific, and the
+# image installs its own dependencies fresh via `pip install -e .`.
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# Frontend build artifacts/dependencies - the image runs its own `npm install`.
+**/node_modules/
+**/dist/
+
+# Local runtime state - real user data/uploads from local dev, and MLflow
+# tracking data - neither belongs in an image.
+apps/api/.data/
+mlruns/
+
+# Version control / editor / OS noise.
+.git/
+.vscode/
+.idea/
+**/.DS_Store
+
+# Large raw ML data this project explicitly keeps out of version control
+# too (see ml/datasets/README.md) - never needed inside a runtime image.
+ml/datasets/manifests/

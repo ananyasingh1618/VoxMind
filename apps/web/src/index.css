@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens for VoxMind's dark, premium interface. Deliberately
+ * desaturated and low-contrast-between-surfaces (no neon, no heavy
+ * gradients) so the "voice intelligence" accent color reads as intentional
+ * rather than decorative.
+ */
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+
+  --color-canvas: #08090c;
+  --color-surface: #0f1117;
+  --color-surface-raised: #151822;
+  --color-border: #23273366;
+  --color-border-strong: #2f3444;
+
+  --color-text-primary: #eef0f6;
+  --color-text-secondary: #a6acc0;
+  --color-text-tertiary: #6b7185;
+
+  --color-accent: #8b7bff;
+  --color-accent-strong: #a597ff;
+  --color-accent-muted: #8b7bff26;
+
+  --color-signal-positive: #56d9a8;
+  --color-signal-caution: #e0b95c;
+  --color-signal-negative: #e2707a;
+
+  --shadow-panel: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset, 0 8px 30px -12px rgba(0, 0, 0, 0.6);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-text-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background-color: var(--color-accent-muted);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
