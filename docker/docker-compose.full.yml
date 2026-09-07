@@ -93,12 +93,22 @@ services:
     # CPU-heavy (Whisper/Wav2Vec2/embeddings/rerank) workload - see
     # docs/celery.md before changing it. Concurrency is deliberately small:
     # each child process can load its own copy of a multi-hundred-MB model.
+    # `-B` embeds Celery Beat (the periodic-task scheduler behind automatic
+    # pipeline-run reconciliation, workers/celery_app.py's beat_schedule)
+    # directly in this same process rather than running a second container
+    # for it - the right choice for this project's current single-worker
+    # deployment (a separate `beat` service would only earn its keep once
+    # this ever scales to multiple worker replicas, since exactly one beat
+    # scheduler must run at a time - see docs/celery.md's reconciliation
+    # section). Beat runs in the main process, not a forked prefork child,
+    # so `--max-tasks-per-child` recycling below never disturbs it.
     command:
       [
         "celery",
         "-A",
         "voxmind.workers.celery_app:celery_app",
         "worker",
+        "-B",
         "--loglevel=info",
         "--queues=voxmind.ml,voxmind.default",
         "--concurrency=2",

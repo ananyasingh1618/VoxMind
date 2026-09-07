@@ -92,4 +92,19 @@ celery_app.conf.update(
     # Django-style app registry, so a direct import is clearer and can't
     # silently fail to find the module.
     imports=["voxmind.workers.tasks"],
+    # Automatic reconciliation scheduling (final limitations-clearance
+    # pass) - see workers/reconciliation.py's module docstring for why
+    # this reuses Celery Beat (a built-in scheduling mode of the same
+    # `celery` package already depended on, not new infrastructure)
+    # instead of leaving reconciliation as a manually/externally-invoked
+    # CLI only. The interval is deliberately independent of, and shorter
+    # than, CELERY_RECONCILIATION_STALE_THRESHOLD_SECONDS (the age a row
+    # must reach before it's considered abandoned) - this just controls
+    # how often the check itself runs, not how patient it is.
+    beat_schedule={
+        "reconcile-stale-pipeline-runs": {
+            "task": "voxmind.reconcile_stale_pipeline_runs",
+            "schedule": settings.CELERY_RECONCILIATION_INTERVAL_SECONDS,
+        },
+    },
 )

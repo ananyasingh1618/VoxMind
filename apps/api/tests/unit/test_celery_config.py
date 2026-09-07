@@ -115,3 +115,69 @@ def test_queue_routing_separates_expensive_ml_work_from_cheap_work():
     assert queue_for_stage("transcript_alignment", settings) == settings.CELERY_QUEUE_DEFAULT
     assert queue_for_stage("document_ingestion", settings) == settings.CELERY_QUEUE_DEFAULT
     assert ML_STAGE_NAMES <= set(STAGE_REGISTRY)
+
+
+def test_reconciliation_is_registered_on_a_real_beat_schedule():
+    """Final limitations-clearance pass: automatic reconciliation
+    scheduling must actually be configured, not just theoretically
+    possible - a real regression guard against someone accidentally
+    removing `beat_schedule` (or renaming the task) without noticing,
+    since nothing else in the request path would ever call it."""
+    settings = get_settings()
+    schedule = celery_app.conf.beat_schedule
+    assert "reconcile-stale-pipeline-runs" in schedule
+    entry = schedule["reconcile-stale-pipeline-runs"]
+    assert entry["task"] == "voxmind.reconcile_stale_pipeline_runs"
+    assert entry["schedule"] == settings.CELERY_RECONCILIATION_INTERVAL_SECONDS
+    # The interval controls how often the check runs, not how patient it
+    # is - it must stay meaningfully shorter than the stale threshold
+    # itself, or a genuinely abandoned run could sit uncaught for close to
+    # (threshold + interval) instead of just past the threshold.
+    assert settings.CELERY_RECONCILIATION_INTERVAL_SECONDS < settings.CELERY_RECONCILIATION_STALE_THRESHOLD_SECONDS
+
+
+def test_the_reconciliation_task_is_registered_once_the_worker_imports_it():
+    import voxmind.workers.tasks  # noqa: F401  (registers the task on the app)
+
+    assert "voxmind.reconcile_stale_pipeline_runs" in celery_app.tasks
+
+
+def test_reconciliation_task_invokes_the_real_underlying_function(monkeypatch):
+    """The scheduled Celery task is a thin wrapper - this proves it
+    actually calls the real `reconcile_stale_pipeline_runs()` function
+    (the same one the CLI entrypoint and every reconciliation test use),
+    not a reimplementation, by monkeypatching that one function and
+    confirming the task's own return value comes from it."""
+    import voxmind.workers.tasks as tasks_module
+
+    calls = []
+
+    async def _fake_reconcile(session, **kwargs):
+        calls.append(session)
+        from dataclasses import dataclass, field
+        import uuid as uuid_module
+
+        @dataclass
+        class _FakeResult:
+            reconciled_ids: list = field(default_factory=lambda: [uuid_module.uuid4(), uuid_module.uuid4()])
+
+            @property
+            def reconciled_count(self):
+                return len(self.reconciled_ids)
+
+        return _FakeResult()
+
+    monkeypatch.setattr("voxmind.workers.reconciliation.reconcile_stale_pipeline_runs", _fake_reconcile)
+
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _fake_session_scope():
+        yield object()
+
+    monkeypatch.setattr(tasks_module, "worker_session_scope", _fake_session_scope)
+
+    result = tasks_module.reconcile_stale_pipeline_runs_task()
+
+    assert result == 2
+    assert len(calls) == 1

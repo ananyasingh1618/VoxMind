@@ -218,3 +218,37 @@ async def _execute_pipeline_stage_async(task: Task, job_id_str: str) -> str:
         await session.commit()
         log.info("pipeline_stage_completed", status="completed", duration_ms=duration_ms)
         return "completed"
+
+
+@celery_app.task(name="voxmind.reconcile_stale_pipeline_runs")
+def reconcile_stale_pipeline_runs_task() -> int:
+    """The periodic Celery Beat task behind automatic reconciliation
+    scheduling (final limitations-clearance pass) - see `workers/
+    reconciliation.py`'s module docstring for the full "why Celery Beat"
+    reasoning and `celery_app.py`'s `beat_schedule` for the interval.
+
+    A thin, real wrapper - all of the actual logic (the stale-threshold
+    query, `FOR UPDATE SKIP LOCKED`, marking rows failed) lives in
+    `reconcile_stale_pipeline_runs()` itself, unchanged by the existence of
+    this scheduled entrypoint; a human running `python -m voxmind.workers.
+    reconciliation` by hand calls the exact same function. Opens its own
+    worker-local session (the same pattern `execute_pipeline_stage` uses,
+    for the same asyncpg/event-loop reasons - see `workers/db.py`).
+
+    Returns the number of runs reconciled this pass (0 is the normal,
+    expected outcome on most ticks - not an error) - visible in Celery's
+    own task result/logs for observability, distinct from the `pipeline_
+    runs` table itself, which stays internal-only (never exposed over
+    HTTP, same guard as everywhere else in this codebase)."""
+    from voxmind.workers.reconciliation import reconcile_stale_pipeline_runs
+
+    async def _run() -> int:
+        async with worker_session_scope() as session:
+            result = await reconcile_stale_pipeline_runs(session)
+        if result.reconciled_count:
+            logger.warning("scheduled_reconciliation_pass_complete", reconciled_count=result.reconciled_count)
+        else:
+            logger.info("scheduled_reconciliation_pass_complete", reconciled_count=0)
+        return result.reconciled_count
+
+    return asyncio.run(_run())

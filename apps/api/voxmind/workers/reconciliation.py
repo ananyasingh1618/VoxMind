@@ -22,17 +22,28 @@ this codebase ever revisits it. `celery_app.py`'s own module docstring and
 flagged this as real, undone future work since Phase 9.1 - this module is
 that work.
 
-**Why a plain reconciliation function + CLI entrypoint, not a Celery beat
-schedule**: adding `celery beat` would mean a new long-running scheduler
-process/state file this project doesn't currently run anywhere (not in
-`docker-compose.full.yml`, not in local dev) - a real new piece of
-infrastructure, not a reuse of what's already there. A plain, idempotent,
-synchronously-invokable function that an operator (or an external cron
-entry, a Docker/Kubernetes scheduled job, or a human running it by hand
-after a known incident) calls periodically is the smaller, equally
-production-sensible choice, and it can be adopted by a real periodic
-scheduler later without changing this function's contract at all. See
-docs/DECISIONS/0017 for the full reasoning.
+**Scheduling, and why it's Celery Beat now (updated - final limitations-
+clearance pass)**: this function was originally shipped as a plain,
+CLI-invokable function with no scheduler of its own, deliberately avoiding
+`celery beat` as a new long-running process this project didn't otherwise
+run - see docs/DECISIONS/0017 for that original reasoning, which is
+preserved there rather than deleted. The remaining limitation that
+decision left behind - "reconciliation needs external scheduling to
+actually run" - has since been closed: `celery beat` is not a separate
+product or dependency, it is a scheduling *mode* already built into the
+`celery` package this project has depended on since Phase 9, so enabling
+it is reuse of existing infrastructure, not new infrastructure. The
+periodic task itself is `workers.tasks.reconcile_stale_pipeline_runs_
+task`, registered in `celery_app.py`'s `beat_schedule`, and is embedded in
+the same single worker process via `celery worker -B`
+(`docker-compose.full.yml`) rather than a separate beat container -
+avoiding a second new container for what is, in this project's current
+single-worker deployment, a single scheduler. This function's own
+contract (`reconcile_stale_pipeline_runs(session, ...)`) did not change at
+all to support this - the periodic task is a thin wrapper around it, per
+the plan the original decision already anticipated. `FOR UPDATE SKIP
+LOCKED` (below) is the real, added protection against a scheduled run
+still being in flight when the next tick fires.
 
 **Why the threshold is derived, not guessed**: see
 `CELERY_RECONCILIATION_STALE_THRESHOLD_SECONDS`'s definition in
@@ -131,8 +142,23 @@ async def reconcile_stale_pipeline_runs(
     reference_time = now or datetime.now(timezone.utc)
     cutoff = reference_time - timedelta(seconds=settings.CELERY_RECONCILIATION_STALE_THRESHOLD_SECONDS)
 
+    # `FOR UPDATE SKIP LOCKED`: real, database-level protection for the
+    # case this project now actually has (a periodic Celery Beat task,
+    # `workers.tasks.reconcile_stale_pipeline_runs_task`) - if a scheduled
+    # run is ever still in flight when the next one fires (a slow pass, a
+    # missed beat tick, or in principle more than one beat scheduler),
+    # both passes would otherwise race to `SELECT` the same stale rows.
+    # `SKIP LOCKED` means a row already locked by an in-flight reconcile
+    # pass is simply excluded from this one's result set - never blocked
+    # on, never double-processed - so two overlapping passes safely
+    # partition the work instead of corrupting or duplicating it. A single
+    # in-process call (the CLI entrypoint, a test) is unaffected: there is
+    # nothing else to contend with, and the row is unlocked again the
+    # moment this transaction commits.
     result = await session.execute(
-        select(PipelineRun).where(PipelineRun.status == "running", PipelineRun.started_at < cutoff)
+        select(PipelineRun)
+        .where(PipelineRun.status == "running", PipelineRun.started_at < cutoff)
+        .with_for_update(skip_locked=True)
     )
     stale_runs = list(result.scalars())
 

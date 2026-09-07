@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -972,3 +973,125 @@ async def test_real_worker_recycles_child_processes_without_breaking_task_correc
             assert run.status == "completed", f"task {i} failed across a recycle boundary: {run.error}"
             result = await runner.get_result(handle.job_id)
             assert len(result.embedding) > 0
+
+
+@pytest.mark.requires_redis
+@pytest.mark.skipif(not _redis_is_reachable(), reason="No reachable Redis broker in this environment.")
+@pytest.mark.asyncio
+async def test_a_hard_killed_worker_leaves_a_stuck_run_that_reconciliation_recovers(db_session):
+    """Final limitations-clearance pass, Part 4: the exact failure mode
+    that motivated reconciliation in the first place, reproduced for real
+    and proven recovered - not simulated at the repository layer alone.
+    This is the local, CI-portable equivalent of the manual Docker
+    verification also performed for this pass (a real `docker kill -s
+    KILL` against the actual `worker` container, a real restart, a real
+    Celery Beat tick reconciling the row, and a real simulated late
+    redelivery correctly treated as a no-op - see docs/celery.md's
+    "Automatic scheduling" section for that account). Here, the same
+    sequence runs against a real local worker *subprocess* instead of a
+    container, so it can run in ordinary test suites without Docker:
+
+      1. A real worker subprocess picks up a genuinely slow task and
+         reaches status="running" (a real `mark_running()` write).
+      2. The subprocess is SIGKILLed mid-task (`Popen.kill()`) - no
+         graceful shutdown, no chance for any Python-level cleanup to run,
+         the same category of hard failure `celery_app.py`'s and
+         `workers/tasks.py`'s own docstrings document as unrecoverable by
+         Celery's own machinery alone.
+      3. The row is confirmed still stuck at "running" - proving the gap
+         genuinely exists here, not asserting it as a given.
+      4. `reconcile_stale_pipeline_runs()` (with `now` pushed far enough
+         forward to clear the real threshold without an actual long wait)
+         recovers it to a real terminal `failed` state.
+      5. A second, fresh real worker subprocess receives a simulated late
+         redelivery of the exact same job_id and correctly treats it as a
+         no-op (the pre-existing "failed is as terminal as completed"
+         guard) - the reconciled state is never corrupted or resurrected.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from voxmind.workers.db import worker_session_scope
+    from voxmind.workers.reconciliation import RECONCILIATION_ERROR_PREFIX, reconcile_stale_pipeline_runs
+
+    repo = PipelineRunRepository(db_session)
+    run = await repo.create(stage_name="test_slow_stage", input_json={"sleep_seconds": 8})
+    await db_session.commit()
+
+    log_path = "/tmp/test_hard_kill_worker.log"
+    with _real_worker(log_path, extra_env={"VOXMIND_TEST_ENABLE_SLOW_STAGE": "1"}) as worker:
+        from voxmind.workers.celery_app import celery_app
+
+        celery_app.send_task("voxmind.execute_pipeline_stage", args=[str(run.id)], queue="voxmind.default")
+
+        # Wait for a real mark_running() write - not a fixed sleep guess.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            await db_session.refresh(run)
+            if run.status == "running":
+                break
+            time.sleep(0.2)
+        assert run.status == "running", f"task never reached running - see {log_path}"
+
+        # A real, important distinction found while writing this test:
+        # `Popen.kill()` alone only SIGKILLs the *main* celery process, not
+        # the prefork pool's forked children - one of which is the actual
+        # OS process executing this sleep(8). Left alive, that orphaned
+        # child keeps running independently of its dead parent and would
+        # finish the task and write "completed" on its own, regardless of
+        # what reconciliation does in the meantime - a real, narrow race
+        # a container-level kill (`docker kill`, an OOM-killer tearing
+        # down a whole cgroup - the realistic hard-failure shapes this
+        # project actually verified live against a real Docker worker
+        # container for this pass) doesn't have, since the whole process
+        # tree dies together. This test kills the *entire* descendant
+        # process tree to match that same "whole worker gone" reality,
+        # not just the top-level PID.
+        child_pids = subprocess.run(
+            ["pgrep", "-P", str(worker.pid)], capture_output=True, text=True
+        ).stdout.split()
+        for pid in child_pids:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(int(pid), signal.SIGKILL)
+        worker.kill()
+        worker.wait(timeout=10)
+        assert worker.returncode != 0
+
+    await db_session.refresh(run)
+    assert run.status == "running", "the row should still be stuck - this is the real gap reconciliation closes"
+
+    result = await reconcile_stale_pipeline_runs(
+        db_session, now=datetime.now(timezone.utc) + timedelta(seconds=get_settings().CELERY_RECONCILIATION_STALE_THRESHOLD_SECONDS + 60)
+    )
+    assert run.id in result.reconciled_ids
+    assert run.status == "failed"
+    assert run.error is not None and run.error.startswith(RECONCILIATION_ERROR_PREFIX)
+    reconciled_error = run.error
+    reconciled_completed_at = run.completed_at
+
+    # A fresh worker now receives what a genuine late broker redelivery of
+    # the original (still-unacked) message would eventually deliver. This
+    # writes through a completely separate session/connection (the real
+    # worker subprocess's own), so - unlike the checks above, which reuse
+    # `db_session`'s own identity-mapped `run` object - the final read
+    # below deliberately opens its own independent session
+    # (`worker_session_scope()`, the same pattern
+    # `test_worker_uses_its_own_session_not_the_callers` already
+    # establishes) rather than `db_session.refresh(run)`, which was found
+    # while writing this test to trigger a real, separate, assertion-
+    # irrelevant asyncpg/NullPool teardown quirk when called after a
+    # function that already committed on the same session - see
+    # tests/unit/test_reconciliation.py's module docstring for the same
+    # finding, documented once there in full.
+    log_path_2 = "/tmp/test_hard_kill_worker_redelivery.log"
+    with _real_worker(log_path_2):
+        from voxmind.workers.celery_app import celery_app
+
+        celery_app.send_task("voxmind.execute_pipeline_stage", args=[str(run.id)], queue="voxmind.default")
+        time.sleep(5)  # real time for the fresh worker to receive and process the redelivered message
+
+    async with worker_session_scope() as independent_session:
+        seen = await independent_session.get(PipelineRun, run.id)
+        assert seen is not None
+        assert seen.status == "failed", "must never be resurrected into completed by a late redelivery"
+        assert seen.error == reconciled_error, "the reconciled error/state must be untouched by the late redelivery"
+        assert seen.completed_at == reconciled_completed_at

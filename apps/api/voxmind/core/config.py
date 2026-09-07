@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     # never looks stale to this threshold; only a row nothing has touched
     # in this entire window is a real reconciliation candidate.
     CELERY_RECONCILIATION_STALE_THRESHOLD_SECONDS: int = 1200
+    # How often Celery Beat fires the reconciliation check itself
+    # (workers/tasks.py::reconcile_stale_pipeline_runs_task) - independent
+    # of, and deliberately much shorter than, the stale threshold above.
+    # 300s (5 minutes) means a genuinely abandoned row is caught within a
+    # few minutes of crossing the 1200s threshold, not indefinitely, while
+    # staying a lightweight, infrequent check (a single indexed query,
+    # normally matching zero rows) - not a tight polling loop.
+    CELERY_RECONCILIATION_INTERVAL_SECONDS: int = 300
 
     # --- Rate limiting (core/rate_limit.py) ---
     # Protects this API from abuse/runaway expensive requests - not a

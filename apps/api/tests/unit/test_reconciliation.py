@@ -35,6 +35,7 @@ without touching any shared pytest-asyncio configuration.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
 
@@ -248,3 +249,36 @@ async def test_a_reconciled_run_is_never_resurrected_by_a_later_redelivery(db_se
     assert run.status == "failed"
     assert run.error is not None and run.error.startswith(RECONCILIATION_ERROR_PREFIX)  # untouched by the late redelivery
     assert run.output_json is None
+
+
+async def test_two_concurrent_reconciliation_passes_never_double_process_the_same_row(db_session):
+    """Final limitations-clearance pass: now that reconciliation runs on a
+    real Celery Beat schedule, a slow pass could in principle still be
+    in flight when the next tick fires. `FOR UPDATE SKIP LOCKED`
+    (reconciliation.py) is the real, database-level protection for
+    exactly this - proven here with two genuinely independent Postgres
+    sessions (separate connections, not the same session used twice, which
+    would prove nothing about real row-level locking) reconciling the same
+    set of stale rows concurrently via `asyncio.gather`. Every stale row
+    must end up reconciled by exactly one of the two passes - never both
+    (which `SKIP LOCKED` prevents outright, so this also guards against a
+    regression to plain `SELECT`, which would let both passes see and
+    "reconcile" the same row) and never neither."""
+    from voxmind.workers.db import worker_session_scope
+
+    stale_ids = set()
+    for _ in range(6):
+        run = await _make_run(db_session, status="running", started_at=_stale_timestamp())
+        stale_ids.add(run.id)
+
+    async def _independent_pass():
+        async with worker_session_scope() as session:
+            return await reconcile_stale_pipeline_runs(session)
+
+    result_a, result_b = await asyncio.gather(_independent_pass(), _independent_pass())
+
+    reconciled_by_a = set(result_a.reconciled_ids)
+    reconciled_by_b = set(result_b.reconciled_ids)
+
+    assert not (reconciled_by_a & reconciled_by_b), "the same row was reconciled by both concurrent passes"
+    assert reconciled_by_a | reconciled_by_b == stale_ids, "every stale row must be reconciled by exactly one pass"
