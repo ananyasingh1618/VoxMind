@@ -47,9 +47,13 @@ pyannote.audio diarization (gated Hugging Face model, no token configured), Anth
 
 ## GitHub Actions CI
 
-**Status: locally validated, execution BLOCKED.** `.github/workflows/ci.yml` was inspected against the now-proven local/Docker dependency-resolution strategy (the two-step `docker-constraints.txt --no-deps` install that fixed a real Python-3.11 dependency conflict, [DECISIONS/0016](DECISIONS/0016-docker-python311-dependency-resolution.md)) and confirmed consistent - CI installs dependencies the identical way. Credential-gated tests (`real_model`, `requires_hf_token`) are correctly excluded from the default CI run rather than silently failing. No secret is placed directly in the workflow file; `JWT_SECRET_KEY` is a dummy CI-only value, not a real credential. Explicit least-privilege `permissions: contents: read` was added this pass (the workflow never pushes, comments, or releases, so the default token scope was unnecessarily broad before).
+**Status: ACTUALLY EXECUTED AND PASSED.** `.github/workflows/ci.yml` was inspected against the proven local/Docker dependency-resolution strategy (the two-step `docker-constraints.txt --no-deps` install that fixed a real Python-3.11 dependency conflict, [DECISIONS/0016](DECISIONS/0016-docker-python311-dependency-resolution.md)) and confirmed consistent. Credential-gated tests (`real_model`, `requires_hf_token`) are correctly excluded from the default CI run rather than silently failing. No secret is placed directly in the workflow file; `JWT_SECRET_KEY` is a dummy CI-only value, not a real credential. Explicit least-privilege `permissions: contents: read` was added this pass.
 
-Actual execution was **not possible** in this environment: no `gh` CLI is installed, no SSH keys exist (`~/.ssh` does not exist), no git credentials or global git config exist, and no `GITHUB_TOKEN`/`GH_TOKEN`/PAT is present in the environment or macOS Keychain - confirmed by direct inspection, not assumed. This is reported honestly as **CI AUTHENTICATION/NETWORK BLOCKED** rather than fabricated as passing.
+GitHub CLI authentication became available partway through this pass. Once it did, the repository was initialized, pushed to a new public GitHub repository ([ananyasingh1618/VoxMind](https://github.com/ananyasingh1618/VoxMind)), and the real push genuinely triggered the workflow - both the `frontend` job (33s) and the `backend` job (7m0s, the full dependency install + ruff + mypy + pytest + `tests/ml`) completed with `conclusion: success` (run [34158910102](https://github.com/ananyasingh1618/VoxMind/actions/runs/34158910102)). This is a real, observed GitHub Actions result, not a local reproduction presented as equivalent. Before this, execution was genuinely blocked (no `gh` CLI, no SSH keys, no token) - documented honestly at the time rather than guessed at, and now superseded by an actual passing run.
+
+## GitHub repository status
+
+The repository is public and pushed: [github.com/ananyasingh1618/VoxMind](https://github.com/ananyasingh1618/VoxMind), default branch `main`, single initial commit `7e5fa2b` (no history was rewritten or force-pushed - this was a brand-new repository with no prior state to overwrite). Before pushing, the local secret/artifact scan found and fixed two `.gitignore` gaps (`.mypy_cache`'s large binary cache, and a root-level `mlruns/` directory) and one genuine generated file (`apps/api/dump.rdb`, a local Redis snapshot) that would otherwise have been committed - none of them made it into the pushed history. A post-push scan of the actual remote tree confirmed no `.env`, credential, or excluded artifact is present.
 
 ## Browser QA (real Playwright walkthrough, not source inspection)
 
@@ -112,7 +116,6 @@ A genuinely fresh (`--no-cache`) rebuild of the full stack (Postgres+pgvector, R
 - Reconciliation has no scheduler of its own - it must be invoked (cron, a scheduled job, or manually) for stale rows to actually be corrected; they are correctly identifiable but not automatically corrected without that invocation.
 - A genuine end-to-end voice-turn round trip with real speech audio was not verified (no real microphone in this environment; Playwright's fake device produces silence).
 - EMO-DB's license terms are not independently confirmed (see licensing section above).
-- GitHub Actions CI has never actually executed in this environment (see above) - all validation is local-only.
 - The hard Celery time limit and any bare `BaseException`/process-kill scenario can still leave a `pipeline_runs` row at `running` until reconciliation's next invocation catches it (not until Celery's own machinery does) - a real, disclosed gap, not silently assumed away.
 
 ## Statement
