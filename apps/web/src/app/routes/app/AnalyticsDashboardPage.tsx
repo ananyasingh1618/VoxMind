@@ -42,7 +42,10 @@ function ChartCard({
 }) {
   return (
     <Card className="p-4">
-      <h3 className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">{title}</h3>
+      {/* axe-core `heading-order`: every card on this page sits directly
+          under the page's own <h1> with no intervening <h2> - was <h3>
+          before, incorrectly skipping a level. */}
+      <h2 className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">{title}</h2>
       {isEmpty || data.length === 0 ? (
         <p className="py-8 text-center text-xs text-[var(--color-text-tertiary)]">{emptyHint}</p>
       ) : (
@@ -95,7 +98,9 @@ export function AnalyticsDashboardPage() {
   })).filter((d) => d.sample_count > 0);
 
   return (
-    <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
+    // axe-core `scrollable-region-focusable`: WCAG 2.1.1 keyboard access -
+    // this page's content can genuinely overflow (many charts/cards).
+    <div className="flex h-full flex-col gap-6 overflow-y-auto p-6" tabIndex={0}>
       <div>
         <h1 className="flex items-center gap-2 text-lg font-semibold text-[var(--color-text-primary)]">
           <BarChart3 size={20} /> Analytics
@@ -169,7 +174,7 @@ export function AnalyticsDashboardPage() {
 
           {data.intelligence.sentiment_trend.length > 1 && (
             <Card className="p-4">
-              <h3 className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">Sentiment trend</h3>
+              <h2 className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">Sentiment trend</h2>
               <div className="h-52 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={data.intelligence.sentiment_trend}>
@@ -188,9 +193,9 @@ export function AnalyticsDashboardPage() {
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Card className="p-4">
-              <h3 className="mb-2 flex items-center gap-1.5 text-sm font-medium text-[var(--color-text-primary)]">
+              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-medium text-[var(--color-text-primary)]">
                 <Activity size={14} /> Semantic-vocal incongruence
-              </h3>
+              </h2>
               {data.intelligence.mismatch_event_count === 0 ? (
                 <p className="text-xs text-[var(--color-text-tertiary)]">No incongruence signals recorded yet.</p>
               ) : (
@@ -206,9 +211,9 @@ export function AnalyticsDashboardPage() {
             </Card>
 
             <Card className="p-4">
-              <h3 className="mb-2 flex items-center gap-1.5 text-sm font-medium text-[var(--color-text-primary)]">
+              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-medium text-[var(--color-text-primary)]">
                 <AlertTriangle size={14} /> Failures & guardrail actions
-              </h3>
+              </h2>
               <ul className="flex flex-col gap-1 text-sm text-[var(--color-text-secondary)]">
                 <li>Audio processing failed: {data.failures.audio_processing_failed}</li>
                 <li>Emotion processing failed: {data.failures.emotion_processing_failed}</li>
@@ -224,7 +229,7 @@ export function AnalyticsDashboardPage() {
       )}
 
       <Card className="p-4">
-        <h3 className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Pipeline health</h3>
+        <h2 className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Pipeline health</h2>
         <ul className="flex flex-col gap-1 text-sm text-[var(--color-text-secondary)]">
           <li>
             LLM provider: <strong>{data.pipeline_health.llm_provider}</strong> —{" "}
@@ -240,7 +245,7 @@ export function AnalyticsDashboardPage() {
       </Card>
 
       <Card className="p-4">
-        <h3 className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Model versions</h3>
+        <h2 className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Model versions</h2>
         {data.model_versions.length === 0 ? (
           <p className="text-xs text-[var(--color-text-tertiary)]">No models registered yet.</p>
         ) : (

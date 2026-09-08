@@ -62,11 +62,20 @@ async def main_async(args: argparse.Namespace) -> None:
 
     v1_samples = load_manifest(args.v1_manifest)
     v1_test = [s for s in v1_samples if s.split == DatasetSplit.TEST]
-    v1_test_speakers = sorted({s.speaker_id for s in v1_test})
+    # RAVDESS always carries a real speaker_id (required for the
+    # speaker-independent split this manifest was built with) - the `if`
+    # below is a real invariant check, not decoration, and is what lets
+    # mypy see this as `set[str]` rather than `set[str | None]`.
+    v1_test_speakers: list[str] = sorted({s.speaker_id for s in v1_test if s.speaker_id is not None})
+    assert len(v1_test_speakers) == len(v1_test), "every v1 RAVDESS sample must carry a real speaker_id"
 
     v2_samples = load_manifest(args.v2_manifest)
-    v2_ravdess_test_speakers = sorted(
-        {s.speaker_id.split(":", 1)[1] for s in v2_samples if s.split == DatasetSplit.TEST and s.dataset_source == "ravdess"}
+    v2_ravdess_test_speakers: list[str] = sorted(
+        {
+            s.speaker_id.split(":", 1)[1]
+            for s in v2_samples
+            if s.split == DatasetSplit.TEST and s.dataset_source == "ravdess" and s.speaker_id is not None
+        }
     )
     if v1_test_speakers != v2_ravdess_test_speakers:
         print(

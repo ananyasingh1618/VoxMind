@@ -112,7 +112,8 @@ export function KnowledgePanel({ conversationId }: { conversationId: string }) {
         )}
       </div>
 
-      <div className="max-h-32 overflow-y-auto border-b border-[var(--color-border)]">
+      {/* axe-core `scrollable-region-focusable`: WCAG 2.1.1 keyboard access. */}
+      <div className="max-h-32 overflow-y-auto border-b border-[var(--color-border)]" tabIndex={0}>
         {isLoading && (
           <div className="flex justify-center py-3">
             <Spinner />
@@ -158,7 +159,8 @@ export function KnowledgePanel({ conversationId }: { conversationId: string }) {
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-2 text-xs">
+      {/* axe-core `scrollable-region-focusable`: WCAG 2.1.1 keyboard access. */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-2 text-xs" tabIndex={0}>
         {!lastAnswer && (
           <p className="p-2 text-[var(--color-text-tertiary)]">
             Ask a question below to retrieve evidence from your documents and generate a grounded answer.

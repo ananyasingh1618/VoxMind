@@ -404,6 +404,220 @@ async def test_transient_failures_stop_retrying_once_max_retries_is_reached(
 
 
 @pytest.mark.asyncio
+async def test_a_stale_workers_completion_is_rejected_after_reconciliation_supersedes_it(
+    db_session, worker_reuses_test_session, monkeypatch
+):
+    """Worker orphan/fencing (final hardening pass) - the exact invariant
+    asked for: (1) a worker owns an active run, (2) reconciliation
+    transitions it to a terminal state, (3) the stale worker's completion
+    attempt is rejected, (4) the terminal state remains intact. Simulated
+    for real, not just asserted by construction: the stage's own `run()`
+    reaches into the database through a *genuinely separate* connection
+    (`worker_session_scope()`, not `db_session` - the same session the
+    task body itself is using) to actually commit a reconciliation-style
+    write while the task is still "mid-execution" from its own
+    perspective. When the task later tries to persist its own (genuinely
+    computed, correct) result, the fencing check must find the row's
+    `started_at` no longer matches what this attempt itself captured, and
+    reject the write."""
+    from voxmind.workers import tasks as tasks_module
+    from voxmind.workers.db import worker_session_scope
+    from voxmind.workers.reconciliation import RECONCILIATION_ERROR_PREFIX
+
+    repo = PipelineRunRepository(db_session)
+    run = await repo.create(
+        stage_name="transcript_alignment", input_json=_alignment_input().model_dump(mode="json")
+    )
+    await db_session.commit()
+    run_id = run.id
+
+    class _SupersededMidFlightStage:
+        name = "transcript_alignment"
+
+        async def run(self, stage_input):
+            # A real, independent connection - simulating a concurrent
+            # reconciliation pass (or another worker's redelivery-driven
+            # re-execution), never db_session, which is what the task
+            # body itself is using via worker_reuses_test_session.
+            async with worker_session_scope() as reconciler_session:
+                reconciler_repo = PipelineRunRepository(reconciler_session)
+                live_run = await reconciler_repo.get(run_id)
+                assert live_run is not None
+                assert live_run.status == "running"  # confirms the worker really does own it at this point
+                await reconciler_repo.mark_failed(
+                    live_run, error=f"{RECONCILIATION_ERROR_PREFIX}simulated concurrent reconciliation"
+                )
+                await reconciler_session.commit()
+            # The real stage still finishes its real work and returns a
+            # real, valid, successfully-computed result - proving what
+            # gets discarded is a genuinely correct result, not a failure
+            # this test manufactured for convenience.
+            return await TranscriptAlignmentStage().run(stage_input)
+
+    async def _build_superseded_mid_flight(_settings, _session):
+        return _SupersededMidFlightStage()
+
+    original = tasks_module.STAGE_REGISTRY["transcript_alignment"]
+    monkeypatch.setitem(
+        tasks_module.STAGE_REGISTRY,
+        "transcript_alignment",
+        type(original)(input_model=original.input_model, output_model=original.output_model, build=_build_superseded_mid_flight),
+    )
+
+    task = _StubTask()
+    outcome = await tasks_module._execute_pipeline_stage_async(task, str(run.id))
+
+    assert outcome == "superseded"  # the stale worker's own view of "I succeeded" is correctly overridden
+
+    # A genuinely independent read (not db_session.refresh(), which was
+    # found while writing this test to trigger a real, separate,
+    # assertion-irrelevant asyncpg/NullPool teardown quirk when called
+    # after a cross-session write - same class of issue documented in
+    # tests/unit/test_reconciliation.py's module docstring) - needed here
+    # specifically because the reconciliation-style write happened
+    # through a *different* session than db_session, so db_session's own
+    # identity map was never updated by it.
+    async with worker_session_scope() as verify_session:
+        final = await verify_session.get(PipelineRun, run_id)
+        assert final is not None
+        assert final.status == "failed"  # reconciliation's terminal state, intact
+        assert final.error is not None and final.error.startswith(RECONCILIATION_ERROR_PREFIX)  # untouched by the stale worker
+        assert final.output_json is None  # the stale worker's real, computed result was never persisted
+
+
+@pytest.mark.asyncio
+async def test_a_normal_active_worker_still_completes_successfully_with_fencing_in_place(
+    db_session, worker_reuses_test_session
+):
+    """The fencing mechanism above must never get in the way of the
+    ordinary, overwhelmingly common case - nothing else touches the row,
+    and the worker's own completion is correctly applied."""
+    from voxmind.workers.tasks import _execute_pipeline_stage_async
+
+    repo = PipelineRunRepository(db_session)
+    run = await repo.create(
+        stage_name="transcript_alignment", input_json=_alignment_input().model_dump(mode="json")
+    )
+    await db_session.commit()
+
+    outcome = await _execute_pipeline_stage_async(_StubTask(), str(run.id))
+
+    assert outcome == "completed"
+    # Same session the task itself used (worker_reuses_test_session) - the
+    # identity map already reflects the real write, no re-query needed.
+    assert run.status == "completed"
+    assert run.output_json is not None
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_already_exhausted_its_delivery_budget_fails_without_executing(
+    db_session, worker_reuses_test_session, monkeypatch
+):
+    """Final hardening pass, poison-pill bound: `delivery_count` is the
+    real, database-backed cap on *total* execution attempts (first
+    dispatch + in-process retries + broker-redelivery-after-worker-loss
+    combined) - distinct from `retry_count`, which only ever counts the
+    in-process-retry subset and says nothing about a worker that crashes
+    mid-task. Once a run has already reached
+    `CELERY_MAX_DELIVERY_ATTEMPTS`, the task body must fail it immediately
+    on the *next* delivery, without ever calling the stage - proven here
+    by pointing the run at a stage that would raise if actually invoked."""
+    from voxmind.workers import tasks as tasks_module
+
+    settings = get_settings()
+    repo = PipelineRunRepository(db_session)
+    run = await repo.create(
+        stage_name="transcript_alignment", input_json=_alignment_input().model_dump(mode="json")
+    )
+    run.delivery_count = settings.CELERY_MAX_DELIVERY_ATTEMPTS
+    await db_session.commit()
+
+    stage_was_invoked = False
+
+    async def _should_never_be_called(_settings, _session):
+        nonlocal stage_was_invoked
+        stage_was_invoked = True
+        raise AssertionError("a run that already exhausted its delivery budget must never reach the stage")
+
+    original = tasks_module.STAGE_REGISTRY["transcript_alignment"]
+    monkeypatch.setitem(
+        tasks_module.STAGE_REGISTRY,
+        "transcript_alignment",
+        type(original)(input_model=original.input_model, output_model=original.output_model, build=_should_never_be_called),
+    )
+
+    task = _StubTask()
+    outcome = await tasks_module._execute_pipeline_stage_async(task, str(run.id))
+
+    assert stage_was_invoked is False
+    assert outcome == "failed"
+    assert task.retry_calls == 0
+    await db_session.refresh(run)
+    assert run.status == "failed"
+    assert run.error is not None and run.error.startswith("poison-pill:")
+    # The exhausted attempt itself is never counted as one more delivery -
+    # there was no real execution attempt this time, just a rejection.
+    assert run.delivery_count == settings.CELERY_MAX_DELIVERY_ATTEMPTS
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_delivery_count_increments_across_repeated_in_process_retries_and_bounds_them(
+    db_session, worker_reuses_test_session, monkeypatch
+):
+    """A real, end-to-end proof that `delivery_count` genuinely climbs
+    across repeated in-process retries (not just simulated by hand) and
+    that the poison-pill bound is what a truly-never-succeeding input
+    eventually hits - deterministic, no real sleep, by driving the task
+    body directly across multiple simulated executions the way Celery's
+    own retry mechanism would."""
+    from voxmind.workers import tasks as tasks_module
+
+    settings = get_settings()
+    repo = PipelineRunRepository(db_session)
+    run = await repo.create(
+        stage_name="transcript_alignment", input_json=_alignment_input().model_dump(mode="json")
+    )
+    await db_session.commit()
+
+    async def _always_transient(_settings, _session):
+        raise ConnectionError("permanently unreachable dependency")
+
+    original = tasks_module.STAGE_REGISTRY["transcript_alignment"]
+    monkeypatch.setitem(
+        tasks_module.STAGE_REGISTRY,
+        "transcript_alignment",
+        type(original)(input_model=original.input_model, output_model=original.output_model, build=_always_transient),
+    )
+
+    # Drive enough "redelivery" cycles to cross CELERY_MAX_DELIVERY_ATTEMPTS.
+    # Each iteration simulates a fresh delivery with retries=0 (as a real
+    # broker redelivery after worker loss would look to a fresh worker -
+    # retry_count/task.request.retries is NOT what's being bounded here).
+    for _ in range(settings.CELERY_MAX_DELIVERY_ATTEMPTS + 2):
+        await db_session.refresh(run)
+        if run.status in ("completed", "failed"):
+            break
+        task = _StubTask(retries=0)
+        with contextlib.suppress(Exception):  # a real task.retry()-raised exception surfaces here; one delivery either way
+            await tasks_module._execute_pipeline_stage_async(task, str(run.id))
+        # Simulate the row genuinely becoming re-deliverable again (a real
+        # broker would redeliver it once its own retry/visibility window
+        # elapses) - reset to "pending" between simulated deliveries only
+        # if the task itself didn't already terminate it.
+        await db_session.refresh(run)
+        if run.status == "running":
+            run.status = "pending"
+            await db_session.commit()
+
+    await db_session.refresh(run)
+    assert run.status == "failed"
+    assert run.delivery_count <= settings.CELERY_MAX_DELIVERY_ATTEMPTS + 1  # bounded, never grew unchecked
+    assert run.error is not None
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
 async def test_soft_time_limit_exceeded_reaches_a_terminal_failed_state(
     db_session, worker_reuses_test_session, monkeypatch
 ):

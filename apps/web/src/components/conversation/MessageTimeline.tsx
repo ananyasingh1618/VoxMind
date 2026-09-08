@@ -38,6 +38,10 @@ export function MessageTimeline({
         icon={<MessageSquare className="text-[var(--color-text-tertiary)]" size={24} />}
         title="No messages yet"
         description="Speak or type below to begin this conversation."
+        // axe-core `heading-order`: this is the main content area directly
+        // under the conversation page's own <h1> (the conversation title),
+        // with no <h2> in between - the default <h3> would skip a level.
+        headingLevel="h2"
       />
     );
   }

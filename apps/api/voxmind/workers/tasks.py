@@ -144,6 +144,32 @@ async def _execute_pipeline_stage_async(task: Task, job_id_str: str) -> str:
             log.info("pipeline_run_already_terminal_skipping_redelivery", status=run.status)
             return run.status
 
+        # Real poison-pill bound (final hardening pass): `delivery_count`
+        # (incremented in mark_running(), see PipelineRunRepository) counts
+        # every genuine execution attempt this row has ever had - first
+        # dispatch, in-process retries, and broker-redelivery-after-
+        # worker-loss alike. CELERY_TASK_MAX_RETRIES already bounds the
+        # in-process-retry path on its own (a caught, classified transient
+        # exception); this is the backstop for the path that bounds
+        # nothing at all today - a worker that crashes/is killed mid-task
+        # repeatedly on the exact same input, whose broker-level
+        # redelivery never touches retry_count. Checked before mark_running
+        # so a run that's already exhausted its budget is never actually
+        # re-executed (and never increments delivery_count again for it).
+        if run.delivery_count >= settings.CELERY_MAX_DELIVERY_ATTEMPTS:
+            await repo.mark_failed(
+                run,
+                error=(
+                    f"poison-pill: exceeded {settings.CELERY_MAX_DELIVERY_ATTEMPTS} delivery "
+                    "attempts without ever reaching a terminal state - this input reliably "
+                    "crashes or is never completed by whatever worker picks it up; see "
+                    "docs/celery.md's poison-pill section."
+                ),
+            )
+            await session.commit()
+            log.error("pipeline_run_exceeded_max_delivery_attempts", status="failed", delivery_count=run.delivery_count)
+            return "failed"
+
         registration = STAGE_REGISTRY.get(run.stage_name)
         if registration is None:
             await repo.mark_failed(run, error=f"Unknown stage_name: {run.stage_name!r}")
@@ -153,19 +179,33 @@ async def _execute_pipeline_stage_async(task: Task, job_id_str: str) -> str:
 
         await repo.mark_running(run, celery_task_id=task.request.id)
         await session.commit()
+        # Worker orphan/fencing (final hardening pass): the exact
+        # started_at THIS execution attempt itself just set - the fencing
+        # token every terminal write below must present unchanged for its
+        # write to actually apply. See PipelineRunRepository.
+        # mark_completed_if_still_owned()'s docstring for the full design.
+        # Captured once, right after mark_running() succeeds, specifically
+        # so a long stage.run() call happening in between can't let the
+        # token go stale out from under this same attempt.
+        expected_started_at = run.started_at
         log.info("pipeline_stage_started")
         started = time.monotonic()
 
         try:
             stage = await registration.build(settings, session)
             if stage is None:
-                await repo.mark_failed(
+                applied = await repo.mark_failed_if_still_owned(
                     run,
                     error=f"Stage {run.stage_name!r} is currently unavailable "
                     "(no active trained model, or no provider configured).",
+                    expected_started_at=expected_started_at,
                 )
                 await session.commit()
-                log.warning("pipeline_stage_unavailable", status="failed", duration_ms=round((time.monotonic() - started) * 1000))
+                duration_ms = round((time.monotonic() - started) * 1000)
+                if not applied:
+                    log.warning("pipeline_run_write_fenced_out_superseded", status="superseded", duration_ms=duration_ms)
+                    return "superseded"
+                log.warning("pipeline_stage_unavailable", status="failed", duration_ms=duration_ms)
                 return "failed"
 
             stage_input = registration.input_model.model_validate(run.input_json)
@@ -189,8 +229,13 @@ async def _execute_pipeline_stage_async(task: Task, job_id_str: str) -> str:
             # above `_TRANSIENT_EXCEPTION_TYPES` for the known limitation
             # if the hard limit does fire instead.
             duration_ms = round((time.monotonic() - started) * 1000)
-            await repo.mark_failed(run, error=f"Stage exceeded its time limit: {exc}")
+            applied = await repo.mark_failed_if_still_owned(
+                run, error=f"Stage exceeded its time limit: {exc}", expected_started_at=expected_started_at
+            )
             await session.commit()
+            if not applied:
+                log.warning("pipeline_run_write_fenced_out_superseded", status="superseded", duration_ms=duration_ms)
+                return "superseded"
             log.warning("pipeline_stage_timed_out", status="failed", duration_ms=duration_ms)
             return "failed"
         except Exception as exc:  # noqa: BLE001 - every stage failure must be classified and persisted, never crash the worker
@@ -199,8 +244,17 @@ async def _execute_pipeline_stage_async(task: Task, job_id_str: str) -> str:
             if transient and task.request.retries < settings.CELERY_TASK_MAX_RETRIES:
                 delay = settings.CELERY_TASK_RETRY_BACKOFF_SECONDS * (2**task.request.retries)
                 await repo.increment_retry_count(run)
-                run.status = "pending"
+                applied = await repo.reset_to_pending_for_retry_if_still_owned(run, expected_started_at=expected_started_at)
                 await session.commit()
+                if not applied:
+                    # This row was superseded (reconciled to a terminal
+                    # state, or already re-owned by another execution)
+                    # while this attempt was mid-classification - resuming
+                    # it into "pending" now would resurrect a decision
+                    # something else already made. Don't ask Celery to
+                    # retry a row this worker no longer owns.
+                    log.warning("pipeline_run_write_fenced_out_superseded", status="superseded", duration_ms=duration_ms)
+                    return "superseded"
                 log.warning(
                     "pipeline_stage_transient_failure_retrying",
                     error=str(exc),
@@ -208,14 +262,26 @@ async def _execute_pipeline_stage_async(task: Task, job_id_str: str) -> str:
                     duration_ms=duration_ms,
                 )
                 raise task.retry(exc=exc, countdown=delay) from exc
-            await repo.mark_failed(run, error=str(exc))
+            applied = await repo.mark_failed_if_still_owned(run, error=str(exc), expected_started_at=expected_started_at)
             await session.commit()
+            if not applied:
+                log.warning("pipeline_run_write_fenced_out_superseded", status="superseded", duration_ms=duration_ms)
+                return "superseded"
             log.warning("pipeline_stage_failed", status="failed", error=str(exc), duration_ms=duration_ms, transient=transient)
             return "failed"
 
         duration_ms = round((time.monotonic() - started) * 1000)
-        await repo.mark_completed(run, output_json=output_json)
+        applied = await repo.mark_completed_if_still_owned(run, output_json=output_json, expected_started_at=expected_started_at)
         await session.commit()
+        if not applied:
+            # Real worker-orphan protection, not a hypothetical: proves a
+            # stale execution's real, successfully-computed result is
+            # discarded rather than resurrecting a row something else
+            # (reconciliation, or another worker's redelivery) already
+            # moved on from - see docs/celery.md's "Worker orphan/fencing"
+            # section and the live test proving this exact scenario.
+            log.warning("pipeline_run_write_fenced_out_superseded", status="superseded", duration_ms=duration_ms)
+            return "superseded"
         log.info("pipeline_stage_completed", status="completed", duration_ms=duration_ms)
         return "completed"
 

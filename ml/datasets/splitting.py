@@ -47,7 +47,12 @@ def speaker_independent_split(
     with_speaker = [s for s in samples if s.speaker_id is not None]
     without_speaker = [s for s in samples if s.speaker_id is None]
 
-    speakers = sorted({s.speaker_id for s in with_speaker})
+    # `with_speaker` is already filtered to `speaker_id is not None`, but
+    # mypy can't carry that narrowing across a separate comprehension - the
+    # redundant `if` here is for the type checker, not runtime behavior
+    # (every element already satisfies it), and turns this into a genuine
+    # `set[str]` instead of `set[str | None]` without an unsafe cast.
+    speakers: list[str] = sorted({s.speaker_id for s in with_speaker if s.speaker_id is not None})
     rng.shuffle(speakers)
 
     n_speakers = len(speakers)
@@ -63,17 +68,24 @@ def speaker_independent_split(
     for speaker in speakers[n_train + n_val :]:
         speaker_split[speaker] = DatasetSplit.TEST
 
-    result = [
-        EmotionSample(
-            sample_id=s.sample_id,
-            audio_path=s.audio_path,
-            label=s.label,
-            dataset_source=s.dataset_source,
-            speaker_id=s.speaker_id,
-            split=speaker_split[s.speaker_id],
+    result: list[EmotionSample] = []
+    for s in with_speaker:
+        # A real runtime guard, not just type-checker theater: `with_speaker`
+        # was already filtered to `speaker_id is not None` above, but mypy
+        # can't carry that narrowing through the intervening dict-building
+        # loop - this assert both proves the invariant and gives mypy (and
+        # anyone reading this later) a real, checked reason to trust it.
+        assert s.speaker_id is not None
+        result.append(
+            EmotionSample(
+                sample_id=s.sample_id,
+                audio_path=s.audio_path,
+                label=s.label,
+                dataset_source=s.dataset_source,
+                speaker_id=s.speaker_id,
+                split=speaker_split[s.speaker_id],
+            )
         )
-        for s in with_speaker
-    ]
 
     if without_speaker:
         shuffled = without_speaker[:]

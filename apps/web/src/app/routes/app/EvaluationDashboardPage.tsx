@@ -155,7 +155,9 @@ function EvaluationTypeCard({ summary }: { summary: EvaluationTypeSummary }) {
     <Card className="flex flex-col gap-4 p-5">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium text-[var(--color-text-primary)]">{TYPE_LABELS[evaluationType]}</h3>
+          {/* axe-core `heading-order`: this card sits directly under the
+              page's own <h1> with no intervening <h2> - was <h3> before. */}
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">{TYPE_LABELS[evaluationType]}</h2>
           <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">{TYPE_DESCRIPTIONS[evaluationType]}</p>
         </div>
         <span
@@ -179,11 +181,15 @@ function EvaluationTypeCard({ summary }: { summary: EvaluationTypeSummary }) {
         <>
           <div className="flex items-center gap-6">
             <HeadlineStat evaluationType={evaluationType} run={latest} />
-            <dl className="flex flex-col gap-0.5 text-xs text-[var(--color-text-tertiary)]">
+            {/* axe-core `definition-list`: these are free-form metadata
+                lines, not real term/definition pairs - a <dl> without
+                proper <dt>/<dd> children is invalid semantic HTML, so a
+                plain <div> (not a fake ARIA list) is the honest fix. */}
+            <div className="flex flex-col gap-0.5 text-xs text-[var(--color-text-tertiary)]">
               {latest.dataset_version && <div>dataset: {latest.dataset_version}</div>}
               {latest.model_version && <div>model: {latest.model_version}</div>}
               <div>n={latest.sample_count} · {new Date(latest.created_at).toLocaleDateString()}</div>
-            </dl>
+            </div>
           </div>
 
           <button
@@ -221,8 +227,9 @@ export function EvaluationDashboardPage() {
     return <ErrorPanel description="Couldn't load the evaluation dashboard." onRetry={() => refetch()} />;
   }
 
+  // axe-core `scrollable-region-focusable`: WCAG 2.1.1 keyboard access.
   return (
-    <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
+    <div className="flex h-full flex-col gap-6 overflow-y-auto p-6" tabIndex={0}>
       <div>
         <h1 className="flex items-center gap-2 text-lg font-semibold text-[var(--color-text-primary)]">
           <FlaskConical size={20} /> Evaluation

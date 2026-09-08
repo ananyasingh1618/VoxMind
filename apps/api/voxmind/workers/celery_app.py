@@ -41,22 +41,28 @@ applies uniformly with either setting for the Redis transport - flipping it
 doesn't add real coverage here, and this project would rather have one
 well-understood, documented recovery mechanism than two overlapping ones.
 
-Known, honest, NOT fixed here: nothing caps how many times a message that
-keeps crashing whatever worker picks it up (a genuine "poison pill" input)
-gets redelivered - Celery's Redis transport has no such cap independent of
-`CELERY_TASK_MAX_RETRIES` (which only governs *caught, in-process* retries,
-not broker-level redelivery after a lost worker).
+Two real gaps this configuration alone doesn't close, both now fixed
+elsewhere (updated - final hardening pass):
 
-A separate, real gap - a `pipeline_runs` row left stuck at "running" forever
-because its owning worker died in a way that bypassed even the broker's own
-redelivery (e.g. the message itself was lost, not just delayed) - is closed
-by `workers/reconciliation.py::reconcile_stale_pipeline_runs()`, a plain,
-idempotent function (not a new Celery beat schedule) invoked via
-`python -m voxmind.workers.reconciliation`. See docs/celery.md's
-"Reconciliation" section and docs/DECISIONS/0017 for the full design and
-why it deliberately doesn't attempt to cap poison-pill redelivery too (a
-row still being legitimately, repeatedly redelivered keeps refreshing its
-own `started_at` and correctly never looks stale to reconciliation).
+1. A `pipeline_runs` row left stuck at "running" forever because its
+   owning worker died in a way that bypassed even the broker's own
+   redelivery (e.g. the message itself was lost, not just delayed) - closed
+   by `workers/reconciliation.py::reconcile_stale_pipeline_runs()`, now
+   running automatically on a real Celery Beat schedule
+   (`celery worker -B`, `celery_app.conf.beat_schedule` below - Beat is a
+   scheduling mode of the same `celery` package this project already
+   depends on, not new infrastructure) as well as remaining invocable by
+   hand via `python -m voxmind.workers.reconciliation`. See docs/celery.md's
+   "Reconciliation" and "Automatic scheduling" sections and
+   docs/DECISIONS/0017.
+2. Nothing capped how many times a message that keeps crashing whatever
+   worker picks it up (a genuine "poison pill" input) could be
+   redelivered - Celery's Redis transport has no such cap independent of
+   `CELERY_TASK_MAX_RETRIES` (which only ever governed *caught, in-process*
+   retries, never broker-level redelivery after a lost worker). Closed by
+   `PipelineRun.delivery_count`, a real database-backed bound checked in
+   `workers/tasks.py` before any stage executes. See docs/celery.md's
+   "Poison-pill bound" section for the full design.
 """
 from __future__ import annotations
 

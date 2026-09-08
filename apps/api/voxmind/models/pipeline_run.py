@@ -11,6 +11,19 @@ worker restarts and is queryable even if Redis is temporarily unreachable.
 value, since a retry is still "running" from the caller's perspective;
 `retry_count` carries the extra detail for observability without adding a
 state `JobHandle`'s callers would have to newly handle.
+
+`delivery_count` (final hardening pass): a real, database-backed bound on
+uncontrolled broker redelivery, distinct from `retry_count`. `retry_count`
+only ever increments on a *caught, in-process* transient failure
+(`task.retry()`) - it says nothing about a worker that crashes/is killed
+mid-task, since that path never reaches the code that increments it at
+all. `delivery_count` increments once per genuine execution attempt
+(`PipelineRunRepository.mark_running()`, the one place every attempt -
+first dispatch, in-process retry, *and* broker-redelivery-after-worker-
+loss - passes through), so it bounds the combined total regardless of
+which mechanism produced the redelivery. See `workers/tasks.py`'s
+`CELERY_MAX_DELIVERY_ATTEMPTS` check for how it's used, and
+docs/celery.md's "Poison-pill bound" section for the full design.
 """
 from __future__ import annotations
 
@@ -51,6 +64,16 @@ class PipelineRun(Base):
         "correlating with broker/worker-side logs and tooling."
     )
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delivery_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="How many times a worker has genuinely started executing this run "
+        "(incremented in PipelineRunRepository.mark_running(), covering first "
+        "dispatch, in-process retries, and broker-redelivery-after-worker-loss "
+        "alike) - the real bound against an uncontrolled poison-pill loop. See "
+        "the model docstring and workers/tasks.py.",
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

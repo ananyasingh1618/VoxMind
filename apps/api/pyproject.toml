@@ -76,6 +76,16 @@ target-version = "py311"
 # not assumed) - silencing import-untyped for exactly these modules, rather
 # than a blanket ignore_missing_imports, keeps real type errors elsewhere
 # from being masked.
+#
+# `sklearn`/`pandas` added during the final hardening pass to bring `ml/`
+# under real, clean mypy coverage (`MYPYPATH=apps/api mypy --config-file
+# apps/api/pyproject.toml ml/`) - scikit-learn ships no stubs at all
+# (verified: no py.typed marker, no separate stub package exists), and
+# pandas' real stubs live in a separate `pandas-stubs` package this
+# project doesn't otherwise need (its own pandas usage in `ml/` is
+# limited to a single dataset loader, `ml/datasets/emodb.py`) - adding
+# that whole dependency for one file's checking wasn't judged worth it,
+# so it's suppressed the same honest way as everything else in this list.
 [[tool.mypy.overrides]]
 module = [
     "boto3.*",
@@ -87,6 +97,8 @@ module = [
     "pgvector.*",
     "celery.*",
     "funasr.*",
+    "sklearn.*",
+    "pandas.*",
 ]
 ignore_missing_imports = true
 

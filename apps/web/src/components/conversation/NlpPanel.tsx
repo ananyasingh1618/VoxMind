@@ -58,7 +58,8 @@ export function NlpPanel({
         </p>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-2 text-xs">
+      {/* axe-core `scrollable-region-focusable`: WCAG 2.1.1 keyboard access. */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-2 text-xs" tabIndex={0}>
         {annotationQuery.isLoading && (
           <div className="flex justify-center py-3">
             <Spinner />

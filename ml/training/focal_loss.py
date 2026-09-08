@@ -37,6 +37,17 @@ class FocalLossWithLabelSmoothing(nn.Module):
         a substitute for it.
     """
 
+    # A real, PyTorch-recommended fix, not a suppression: `register_buffer`
+    # sets `self.alpha` dynamically via `nn.Module.__setattr__`, which
+    # mypy's torch stubs can't reliably infer through - without this
+    # explicit class-level annotation, mypy instead resolves `self.alpha`
+    # via `nn.Module.__getattr__`'s generic fallback and (a known stub
+    # limitation for exactly this pattern) infers it as the `Tensor` type
+    # object itself rather than an instance, making `self.alpha.to(...)`
+    # look like an attempt to call the class. Declaring the real runtime
+    # type here is the officially documented way to type a PyTorch buffer.
+    alpha: torch.Tensor
+
     def __init__(self, *, num_classes: int, gamma: float = 2.0, label_smoothing: float = 0.05, alpha: torch.Tensor | None = None) -> None:
         super().__init__()
         if not 0.0 <= label_smoothing < 1.0:

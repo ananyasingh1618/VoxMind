@@ -35,6 +35,11 @@ export function ConversationsListPage() {
         icon={<MessageSquare className="text-[var(--color-text-tertiary)]" size={28} />}
         title="No conversations yet"
         description="Start a new session to begin speaking with VoxMind."
+        // axe-core `page-has-heading-one`: this is the entire content of
+        // the page for a first-time user (no conversations yet) - the
+        // most common state a brand-new user actually sees - and needs a
+        // real <h1>, not the component's usual <h3> default.
+        headingLevel="h1"
         action={
           <Button onClick={handleCreate} isLoading={createConversation.isPending}>
             <Plus size={15} /> New conversation

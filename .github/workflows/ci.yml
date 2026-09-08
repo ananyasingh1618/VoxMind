@@ -98,6 +98,18 @@ jobs:
       # environment, since this repository doesn't have `gh`/CI execution
       # access to catch it by actually running the workflow.
       - run: cd ../.. && pytest tests/ml
+      # `ml/` genuinely imports from `voxmind` (the training/evaluation
+      # scripts reuse real app code - storage, DB sessions, provider
+      # classes), so mypy needs MYPYPATH pointed at apps/api to resolve
+      # those imports - without it, every voxmind.* import silently
+      # resolves to Any and real cross-package type errors go undetected
+      # (found for real during the final hardening pass: three genuine
+      # union-attr bugs in ml/evaluation/evaluate_retrieval.py were
+      # invisible until this was fixed). --config-file apps/api/pyproject.toml
+      # reuses the same ignore_missing_imports overrides (boto3, sklearn,
+      # pandas, etc.) `mypy voxmind` above already relies on, so only
+      # genuinely stub-less libraries are silenced, not real errors.
+      - run: cd ../.. && MYPYPATH=apps/api mypy --config-file apps/api/pyproject.toml ml/
 
   frontend:
     runs-on: ubuntu-latest

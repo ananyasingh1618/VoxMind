@@ -626,6 +626,12 @@ async def run_training(args: argparse.Namespace) -> None:
     stage2_start_epoch = 0
     stage2_initial_patience_count = 0
     if resuming_into_stage2:
+        # `resuming_into_stage2` already encodes `resume_data is not None`
+        # (see its definition above), but that's a fact about a *different*
+        # variable mypy can't carry across into this block - this assert
+        # is a real, always-true-here check that makes the dependency
+        # explicit rather than working around it with a cast.
+        assert resume_data is not None
         stage2_optimizer.load_state_dict(resume_data["optimizer_state_dict"])
         stage2_start_epoch = resume_data["epoch_in_stage"]
         stage2_initial_patience_count = resume_data["epochs_without_improvement"]

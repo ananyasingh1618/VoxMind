@@ -34,7 +34,10 @@ export function Register() {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-[var(--color-canvas)] px-4">
+    // axe-core `landmark-one-main`/`region`: this page renders outside the
+    // authenticated app shell (which already has its own <main>), so it
+    // needs its own landmark - was a bare <div> before.
+    <main className="flex min-h-dvh items-center justify-center bg-[var(--color-canvas)] px-4">
       <Card className="w-full max-w-sm p-6">
         <h1 className="mb-1 text-lg font-semibold">Create your account</h1>
         <p className="mb-6 text-sm text-[var(--color-text-secondary)]">
@@ -69,11 +72,15 @@ export function Register() {
         </form>
         <p className="mt-5 text-center text-sm text-[var(--color-text-secondary)]">
           Already have an account?{" "}
-          <Link to="/login" className="text-[var(--color-accent-strong)] hover:underline">
+          {/* axe-core `link-in-text-block` (WCAG 1.4.1, Use of Color): this
+              link sits inline within body text - color alone (even on
+              hover) isn't a sufficient visual distinction, so it's
+              underlined by default now, not just on hover. */}
+          <Link to="/login" className="text-[var(--color-accent-strong)] underline">
             Sign in
           </Link>
         </p>
       </Card>
-    </div>
+    </main>
   );
 }

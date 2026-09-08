@@ -119,6 +119,12 @@ async def run_evaluation(args: argparse.Namespace) -> None:
                 conversation_id=conversation.id, query_message_id=user_turn.id, query=q["query"]
             )
             trace_row = await RetrievalResultRepository(session).get_by_id(retrieval_result_id)
+            # `retrieval.retrieve()` just created this row in this same
+            # transaction, a few lines above - a real None here would mean
+            # the retrieval result vanished immediately after being
+            # written, a genuine bug worth failing loudly on, not an
+            # Optional case worth silently chaining around.
+            assert trace_row is not None, f"retrieval_result {retrieval_result_id} was just created but is not found"
             ranked_items = sorted(trace_row.items, key=lambda item: item["hybrid_rank"])
 
             ranked_relevant: list[bool] = []
@@ -144,7 +150,14 @@ async def run_evaluation(args: argparse.Namespace) -> None:
         metrics = compute_retrieval_metrics(query_results, k_values=args.k)
 
         print(f"\n=== Retrieval evaluation: {dataset['version']} ===")
-        print(f"n_queries={metrics.n_queries} mrr={metrics.mrr:.4f} reranked={trace_row.reranked}")
+        # `settings.RERANK_ENABLED` (not the last loop iteration's
+        # `trace_row`, which mypy correctly can't assume is still bound/
+        # non-None here if the dataset had zero queries) is the real
+        # authoritative source for this - reranking is a pipeline-wide
+        # setting, not something that varies per query, and this exact
+        # value is already what's persisted in `run_repo.create(...)`'s
+        # `model_version` string below.
+        print(f"n_queries={metrics.n_queries} mrr={metrics.mrr:.4f} reranked={settings.RERANK_ENABLED}")
         for k in args.k:
             print(f"  recall@{k}={metrics.recall_at_k[k]:.4f} precision@{k}={metrics.precision_at_k[k]:.4f} ndcg@{k}={metrics.ndcg_at_k[k]:.4f}")
 

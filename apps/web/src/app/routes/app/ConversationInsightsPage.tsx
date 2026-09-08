@@ -15,8 +15,9 @@ export function ConversationInsightsPage() {
     return <ErrorPanel description="Couldn't load conversation insights." onRetry={() => refetch()} />;
   }
 
+  // axe-core `scrollable-region-focusable`: WCAG 2.1.1 keyboard access.
   return (
-    <div className="flex h-full flex-col overflow-y-auto p-6">
+    <div className="flex h-full flex-col overflow-y-auto p-6" tabIndex={0}>
       <div className="mb-4 flex items-center gap-3">
         <Link
           to={`/app/conversations/${id}`}
@@ -35,6 +36,9 @@ export function ConversationInsightsPage() {
           icon={<Sparkles className="text-[var(--color-text-tertiary)]" size={28} />}
           title="Nothing to show yet"
           description="Send a message in this conversation to see real sentiment, emotion, and incongruence signals here."
+          // axe-core `heading-order`: this is the main content area
+          // directly under this page's own <h1>, with no <h2> in between.
+          headingLevel="h2"
         />
       ) : (
         <div className="flex flex-col gap-6">

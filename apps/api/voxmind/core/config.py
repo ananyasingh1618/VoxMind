@@ -99,6 +99,19 @@ class Settings(BaseSettings):
     CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: int = 270
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_BACKOFF_SECONDS: int = 5
+    # Real, database-backed poison-pill bound (final hardening pass) - see
+    # PipelineRun.delivery_count's docstring and workers/tasks.py for the
+    # full mechanism. Deliberately set well above CELERY_TASK_MAX_RETRIES's
+    # own bound on the *normal* in-process retry path (a maximum of
+    # 1 + CELERY_TASK_MAX_RETRIES = 4 attempts there) - this is a backstop
+    # for the case that path doesn't cover at all (a worker crashing/being
+    # killed mid-task, whose broker-level redelivery never touches
+    # retry_count), not a stricter replacement for it. 10 gives real
+    # headroom for a few genuine crash-redelivery cycles (e.g. transient
+    # infra trouble under load) before treating a run as a true poison
+    # pill, while still being a real, finite, enforced ceiling rather than
+    # an unbounded loop.
+    CELERY_MAX_DELIVERY_ATTEMPTS: int = 10
     # How long a `pipeline_runs` row may sit at status="running" before
     # workers/reconciliation.py treats it as abandoned rather than
     # genuinely in-progress - see that module's docstring and

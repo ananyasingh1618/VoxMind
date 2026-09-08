@@ -33,6 +33,8 @@ Runs the uploaded audio through `ffmpeg` via stdin/stdout pipes (no temp files t
 
 Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2-accelerated Whisper). Model weights come from the **non-gated** `Systran/faster-whisper-<size>` Hugging Face repos - no account or token is required, unlike diarization.
 
+**License (verified directly, final hardening pass)**: the `faster-whisper` package itself is **MIT**, confirmed against its GitHub repository. The specific model weights this project actually loads (`Systran/faster-whisper-tiny` by default) are also **MIT**, confirmed directly against that repo's own Hugging Face model card (`license: mit`). No redistribution or commercial-use restriction - this project only downloads and runs the weights, never redistributes them itself.
+
 Configuration (`.env.example`):
 
 ```
@@ -52,6 +54,8 @@ Confidence caveat: faster-whisper does not expose a calibrated confidence score.
 ## Speaker diarization: pyannote.audio
 
 Uses [pyannote.audio](https://github.com/pyannote-audio/pyannote-audio)'s `pyannote/speaker-diarization-3.1` pipeline. Unlike Whisper, **this model is gated** on Hugging Face.
+
+**License (verified directly, final hardening pass)**: both `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` (the pipeline depends on both) are **MIT**, confirmed directly against each model's own Hugging Face card. The gating requirement is an access-control/contact-collection mechanism the maintainers describe explicitly as not restricting the model's open-source status ("this pipeline uses MIT license and will always remain open-source") - it is not a separate, more restrictive license layered on top. This project only downloads and runs the weights, never redistributes them.
 
 ### Credentials required to run this for real
 

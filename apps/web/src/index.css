@@ -19,7 +19,14 @@
 
   --color-text-primary: #eef0f6;
   --color-text-secondary: #a6acc0;
-  --color-text-tertiary: #6b7185;
+  /* WCAG AA fix (final hardening pass, axe-core `color-contrast` finding):
+     the original #6b7185 measured 3.89:1 against --color-surface and
+     3.65:1 against --color-surface-raised - both below the 4.5:1 minimum
+     for normal text. #8087a0 measures 5.29:1 / 4.97:1 respectively (real,
+     computed WCAG relative-luminance ratios, not eyeballed), while
+     staying visibly more muted than --color-text-secondary (8.34:1) to
+     preserve the primary/secondary/tertiary hierarchy. */
+  --color-text-tertiary: #8087a0;
 
   --color-accent: #8b7bff;
   --color-accent-strong: #a597ff;

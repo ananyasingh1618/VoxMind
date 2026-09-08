@@ -196,7 +196,8 @@ async def run_training(args: argparse.Namespace) -> None:
             optimizer.step()
 
         model.eval()
-        val_true, val_pred = [], []
+        val_true: list[str] = []
+        val_pred: list[str] = []
         with torch.no_grad():
             for batch_features, batch_targets in val_loader:
                 logits = model(batch_features)
@@ -222,7 +223,8 @@ async def run_training(args: argparse.Namespace) -> None:
     model.load_state_dict(best_state_dict)
 
     model.eval()
-    test_true, test_pred = [], []
+    test_true: list[str] = []
+    test_pred: list[str] = []
     with torch.no_grad():
         for batch_features, batch_targets in test_loader:
             logits = model(batch_features)
